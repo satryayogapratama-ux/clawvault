@@ -217,6 +217,19 @@ class VectorStore:
         self.embeddings = {}  # chunk_id -> embedding array
         self.chunks_by_doc = {}  # doc_id -> [chunk_ids]
         self._init_db()
+        self._load_embeddings_from_db()  # load persisted embeddings into memory
+
+    def _load_embeddings_from_db(self):
+        """Load all stored embeddings from DB into memory on startup."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT chunk_id, embedding FROM embeddings")
+        rows = cursor.fetchall()
+        conn.close()
+        for chunk_id, emb_blob in rows:
+            if emb_blob:
+                arr = np.frombuffer(emb_blob, dtype=np.float32).copy()
+                self.embeddings[chunk_id] = arr
     
     def _init_db(self):
         """Initialize SQLite database schema."""
