@@ -5,15 +5,59 @@ A self-contained knowledge base system using sentence-transformers for embedding
 and SQLite for vector storage. No external APIs required.
 """
 
+import ipaddress
 import json
+import socket
 import sqlite3
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, asdict
+from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 import re
+
+# ─── SSRF Protection ──────────────────────────────────────────────────────────
+ALLOWED_SCHEMES = {'http', 'https'}
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB cap
+
+def _is_safe_url(url: str) -> tuple[bool, str]:
+    """
+    Validate URL to prevent SSRF attacks.
+    Blocks: private IPs, link-local, loopback, metadata endpoints, non-http(s).
+    Returns (is_safe, reason).
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL"
+
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        return False, f"Scheme '{parsed.scheme}' not allowed (only http/https)"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "No hostname"
+
+    # Block known cloud metadata endpoints
+    blocked_hosts = {'169.254.169.254', 'metadata.google.internal', 'metadata.aws.internal'}
+    if hostname.lower() in blocked_hosts:
+        return False, "Metadata endpoint blocked"
+
+    # Resolve hostname and check IP range
+    try:
+        addr_info = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in addr_info:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False, f"Private/internal IP blocked: {ip}"
+    except socket.gaierror:
+        return False, f"Cannot resolve hostname: {hostname}"
+    except ValueError:
+        pass  # Not a valid IP string — already resolved above
+
+    return True, "ok"
 
 # Try importing sentence-transformers, with fallback
 try:
@@ -337,10 +381,24 @@ class DocumentIngester:
     @staticmethod
     def from_url(url: str) -> Optional[str]:
         """Fetch and extract text from URL."""
+        safe, reason = _is_safe_url(url)
+        if not safe:
+            print(f"URL blocked ({reason}): {url}")
+            return None
+
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=10, stream=True)
             response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Enforce size limit
+            content_bytes = b''
+            for chunk in response.iter_content(chunk_size=65536):
+                content_bytes += chunk
+                if len(content_bytes) > MAX_RESPONSE_BYTES:
+                    print(f"URL response too large (>{MAX_RESPONSE_BYTES // 1024}KB): {url}")
+                    return None
+
+            soup = BeautifulSoup(content_bytes, 'html.parser')
             
             # Remove script and style elements
             for script in soup(["script", "style"]):
