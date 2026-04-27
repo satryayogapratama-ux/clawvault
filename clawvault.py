@@ -9,6 +9,8 @@ import ipaddress
 import json
 import socket
 import sqlite3
+import time
+from datetime import datetime
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
@@ -577,3 +579,108 @@ class ClawVault:
             for doc in self.list_docs():
                 self.vector_store.delete_document(doc['doc_id'])
             print("✓ Cleared all documents")
+
+    def review(self, source: str, relay_url: str = "http://43.157.205.88:5679", 
+               relay_token: str = None) -> Dict:
+        """
+        Send a file/code to Opus relay for review, then store the review as a doc in vault.
+        Returns: {success, review_text, doc_id (of stored review)}
+        """
+        import json
+        from pathlib import Path
+        
+        # Step 1: Read file content or use as-is
+        source_path = Path(source)
+        if source_path.exists() and source_path.is_file():
+            try:
+                with open(source_path, 'r', encoding='utf-8') as f:
+                    code_content = f.read()
+                filename = source_path.name
+            except Exception as e:
+                return {"success": False, "error": f"Failed to read file: {e}"}
+        else:
+            code_content = source
+            filename = "inline_code"
+        
+        # Step 2: POST to relay with Bearer auth
+        try:
+            headers = {
+                "Content-Type": "application/json"
+            }
+            if relay_token:
+                headers["Authorization"] = f"Bearer {relay_token}"
+            
+            payload = {
+                "code": code_content,
+                "context": f"File: {filename}"
+            }
+            
+            response = requests.post(
+                f"{relay_url.rstrip('/')}/v1/messages",
+                json=payload,
+                headers=headers,
+                timeout=300
+            )
+            
+            if response.status_code != 200:
+                return {"success": False, "error": f"Relay returned {response.status_code}: {response.text}"}
+            
+            result = response.json()
+            review_text = result.get("review", "")
+            
+        except requests.RequestException as e:
+            return {"success": False, "error": f"Failed to connect to relay: {e}"}
+        
+        # Step 3: Ingest the review as a new document into vault
+        try:
+            review_doc_id = f"review_{int(time.time())}_{hash(code_content) % 1000000}"
+            review_title = f"Review: {filename}"
+            
+            # Create a markdown document from the review
+            review_markdown = f"""# {review_title}
+
+**Source File:** {filename}
+**Reviewed At:** {datetime.now().isoformat()}
+
+## Review
+
+{review_text}
+"""
+            
+            # Create document object
+            doc = Document(
+                doc_id=review_doc_id,
+                title=review_title,
+                source=source,
+                source_type="review",
+                content=review_markdown
+            )
+            
+            # Chunk and embed
+            chunks_text = self.chunker.chunk(review_markdown)
+            embeddings = self.embedding_engine.embed(chunks_text)
+            chunks = []
+            
+            for i, (text, embedding) in enumerate(zip(chunks_text, embeddings)):
+                chunk = Chunk(
+                    chunk_id=f"{doc.doc_id}_chunk_{i}",
+                    doc_id=doc.doc_id,
+                    text=text,
+                    start_pos=0,
+                    end_pos=len(text),
+                    embedding=embedding
+                )
+                chunks.append(chunk)
+            
+            # Store in vault
+            self.vector_store.add_document(doc, chunks)
+            
+            return {
+                "success": True,
+                "review_text": review_text,
+                "doc_id": review_doc_id,
+                "title": review_title
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": f"Failed to store review in vault: {e}"}
