@@ -1,5 +1,9 @@
 # ClawVault: Local RAG Knowledge Base for OpenClaw
 
+> **Status: Production · Self-hosted** — Actively used in production by the author. Open-source and available for deployment.
+
+![Status](https://img.shields.io/badge/Status-Production%20Self--hosted-brightgreen.svg)
+
 ## Problem
 
 OpenClaw has no built-in way to reference private documents or maintain a personal knowledge base. Standard LLMs cannot access your files, emails, or internal documents. You're forced to manually copy-paste or use external services that require sharing your data.
